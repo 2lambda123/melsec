@@ -3,7 +3,7 @@ Non-blocking MELSEC Communication protocol for Java.
 Quick Start
 --------
 ```java
-MelsecClientConfig config = new MelsecClientConfig.Builder("localhost").build();
+MelsecClientConfig config = new MelsecClientConfig.Builder("localhost", 6000).build();
 MelsecTcpClient client = MelsecTcpClient.create3EBinary(config);
 
 client.batchRead("D100", 3)
