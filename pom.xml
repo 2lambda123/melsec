@@ -24,6 +24,27 @@
         <junit.version>4.12</junit.version>
     </properties>
 
+    <repositories>
+        <repository>
+            <id>vsdata-public</id>
+            <name>vsdata public resp</name>
+            <url>http://nexus.wenshidata.com/repository/maven-public/</url>
+        </repository>
+    </repositories>
+
+    <distributionManagement>
+        <repository>
+            <id>vsdata-releases</id>
+            <name>vsdata releases resp</name>
+            <url>http://nexus.wenshidata.com/repository/vsdata-releases/</url>
+        </repository>
+        <snapshotRepository>
+            <id>vsdata-snapshots</id>
+            <name>vsdata snapshots resp</name>
+            <url>http://nexus.wenshidata.com/repository/vsdata-snapshots/</url>
+        </snapshotRepository>
+    </distributionManagement>
+
     <build>
         <plugins>
             <plugin>
