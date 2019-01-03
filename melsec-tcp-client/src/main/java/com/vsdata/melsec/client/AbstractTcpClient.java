@@ -1,10 +1,14 @@
 package com.vsdata.melsec.client;
 
 import com.vsdata.melsec.MelsecTimeoutException;
+import com.vsdata.melsec.message.UnitType;
 import com.vsdata.melsec.message.e.FrameECommand;
 import com.vsdata.melsec.message.e.FrameEResponse;
+import com.vsdata.melsec.utils.BinaryConverters;
+import com.vsdata.melsec.utils.ByteBufUtilities;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -16,6 +20,8 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author liumin
@@ -24,11 +30,14 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
-    private final ConcurrentLinkedQueue<PendingRequest<? extends FrameEResponse>> pendingRequests = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<PendingRequest<? extends FrameEResponse>>
+        pendingRequestQueue = new ConcurrentLinkedQueue<>();
 
     private final ChannelManager channelManager;
 
     protected final MelsecClientConfig config;
+
+    private Lock lock = new ReentrantLock();
 
     public AbstractTcpClient(MelsecClientConfig config) {
         this.config = config;
@@ -111,31 +120,24 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
     }
 
     @Override
-    public <T extends FrameEResponse> CompletableFuture<T> sendRequest(FrameECommand request) {
+    public <T extends FrameEResponse> CompletableFuture<T> sendRequest(FrameECommand command) {
         CompletableFuture<T> future = new CompletableFuture<>();
-
         channelManager.getChannel().whenComplete((ch, ex) -> {
             if (ch != null) {
-                Timeout timeout = config.getWheelTimer().newTimeout(t -> {
-                    if (t.isCancelled()) {
-                        return;
-                    }
-                    PendingRequest<? extends FrameEResponse> timedOut = pendingRequests.poll();
-                    if (timedOut != null) {
-                        timedOut.promise.completeExceptionally(new MelsecTimeoutException(config.getTimeout()));
-                    }
-                }, config.getTimeout().getSeconds(), TimeUnit.SECONDS);
-
-                pendingRequests.add(new PendingRequest<>(future, timeout));
-                ch.writeAndFlush(request).addListener(f -> {
-                    if (!f.isSuccess()) {
-                        PendingRequest<?> p = pendingRequests.poll();
-                        if (p != null) {
-                            p.promise.completeExceptionally(f.cause());
-                            p.timeout.cancel();
+                try {
+                    lock.lock();
+                    PendingRequest<? extends FrameEResponse> pendingRequest = new PendingRequest<>(command, future);
+                    pendingRequestQueue.add(pendingRequest);
+                    ch.writeAndFlush(command).addListener(f -> {
+                        if (!f.isSuccess()) {
+                            pendingRequestQueue.remove(pendingRequest);
+                            pendingRequest.promise.completeExceptionally(f.cause());
+                            pendingRequest.timeout.cancel();
                         }
-                    }
-                });
+                    });
+                } finally {
+                    lock.unlock();
+                }
             } else {
                 future.completeExceptionally(ex);
             }
@@ -150,12 +152,19 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
     }
 
     private void handleResponse(FrameEResponse response) {
-        PendingRequest<?> pending = pendingRequests.poll();
+        PendingRequest<?> pending = pendingRequestQueue.poll();
         if (pending != null) {
             pending.timeout.cancel();
+            // Data conversion
+            if (pending.command.getPrincipal().getDevice().getType() == UnitType.BIT) {
+                byte[] bytes = BinaryConverters.convertBinaryOnBitToBoolArray(
+                    ByteBufUtilities.readAllBytes(response.getData()),
+                    pending.command.getPrincipal().getPoints());
+                response.setData(Unpooled.wrappedBuffer(bytes));
+            }
             pending.promise.complete(response);
         } else {
-            ReferenceCountUtil.release(response);
+            ReferenceCountUtil.release(response.getData());
             logger.debug("Received response for unknown response: {}", response);
         }
     }
@@ -181,18 +190,34 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
     }
 
     private void failPendingRequests(Throwable cause) {
-        pendingRequests.forEach(p -> p.promise.completeExceptionally(cause));
-        pendingRequests.clear();
+        try {
+            lock.lock();
+            pendingRequestQueue.forEach(p -> p.promise.completeExceptionally(cause));
+            pendingRequestQueue.clear();
+        } finally {
+            lock.unlock();
+        }
     }
 
-    private static class PendingRequest<T> {
+    private class PendingRequest<T> {
         private final CompletableFuture<FrameEResponse> promise = new CompletableFuture<>();
 
         private final Timeout timeout;
 
+        private FrameECommand command;
+
         @SuppressWarnings("unchecked")
-        private PendingRequest(CompletableFuture<T> future, Timeout timeout) {
-            this.timeout = timeout;
+        private PendingRequest(FrameECommand command, CompletableFuture<T> future) {
+            this.command = command;
+
+            this.timeout = config.getWheelTimer().newTimeout(t -> {
+                if (t.isCancelled()) {
+                    return;
+                }
+                pendingRequestQueue.remove(this);
+                promise.completeExceptionally(new MelsecTimeoutException(config.getTimeout()));
+
+            }, config.getTimeout().getSeconds(), TimeUnit.SECONDS);
 
             promise.whenComplete((r, ex) -> {
                 if (r != null) {
