@@ -71,11 +71,12 @@ public class ServerFrameEMessageHandler extends SimpleChannelInboundHandler {
                         int bufferIndex = 0;
                         for (int i = addr; i < addr + points; i++) {
                             int[] dest = (int[]) device.getData();
-                            if (isAscii) {
-                                dest[i] = buffer.getUnsignedShort(bufferIndex);
-                            } else {
-                                dest[i] = buffer.getUnsignedShortLE(bufferIndex);
-                            }
+//                            if (isAscii) {
+//                                dest[i] = buffer.getUnsignedShort(bufferIndex);
+//                            } else {
+//                                dest[i] = buffer.getUnsignedShortLE(bufferIndex);
+//                            }
+                            dest[i] = buffer.getUnsignedShort(bufferIndex);
                             bufferIndex += 2;
                         }
                     }
