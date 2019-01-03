@@ -1,12 +1,14 @@
 package com.vsdata.melsec.client;
 
 import com.vsdata.melsec.MelsecTimeoutException;
+import com.vsdata.melsec.message.Function;
 import com.vsdata.melsec.message.UnitType;
 import com.vsdata.melsec.message.e.FrameECommand;
 import com.vsdata.melsec.message.e.FrameEResponse;
 import com.vsdata.melsec.utils.BinaryConverters;
 import com.vsdata.melsec.utils.ByteBufUtilities;
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
@@ -156,11 +158,18 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
         if (pending != null) {
             pending.timeout.cancel();
             // Data conversion
-            if (pending.command.getPrincipal().getDevice().getType() == UnitType.BIT) {
-                byte[] bytes = BinaryConverters.convertBinaryOnBitToBoolArray(
-                    ByteBufUtilities.readAllBytes(response.getData()),
-                    pending.command.getPrincipal().getPoints());
-                response.setData(Unpooled.wrappedBuffer(bytes));
+            if (pending.command.getPrincipal().getFunction() == Function.BATCH_READ) {
+                if (pending.command.getPrincipal().getDevice().getType() == UnitType.BIT) {
+                    byte[] bytes = BinaryConverters.convertBinaryOnBitToBoolArray(
+                        ByteBufUtilities.readAllBytes(response.getData()),
+                        pending.command.getPrincipal().getPoints());
+                    response.setData(Unpooled.wrappedBuffer(bytes));
+                } else {
+                    int remaining = response.getData().readableBytes();
+                    ByteBuf data = Unpooled.buffer(remaining);
+                    ByteBufUtilities.swapLEToBE(data, response.getData());
+                    response.setData(data);
+                }
             }
             pending.promise.complete(response);
         } else {
