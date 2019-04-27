@@ -20,7 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -32,8 +32,8 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
-    private final ConcurrentLinkedQueue<PendingRequest<? extends FrameEResponse>>
-        pendingRequestQueue = new ConcurrentLinkedQueue<>();
+    private final SynchronousQueue<PendingRequest<? extends FrameEResponse>>
+        pendingRequestQueue = new SynchronousQueue<>();
 
     private final ChannelManager channelManager;
 
@@ -125,29 +125,25 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
     @Override
     public <T extends FrameEResponse> CompletableFuture<T> sendRequest(FrameECommand command) {
         CompletableFuture<T> future = new CompletableFuture<>();
-        channelManager.getChannel().whenComplete((ch, ex) -> {
+        channelManager.getChannel().whenCompleteAsync((ch, ex) -> {
             if (ch != null) {
                 // 获取锁，使得同一时间内只能发送一个请求
                 lock.lock();
                 try {
                     PendingRequest<? extends FrameEResponse> pendingRequest = new PendingRequest<>(command, future);
-                    pendingRequestQueue.add(pendingRequest);
-                    Throwable cause = null;
-                    try {
-                        ChannelFuture writeFuture = ch.writeAndFlush(command).sync();
-                        if (!writeFuture.isSuccess()) {
-                            cause = writeFuture.cause();
+                    ch.writeAndFlush(command).addListener(f -> {
+                        if (!f.isSuccess()) {
+                            pendingRequestQueue.poll();
+                            pendingRequest.promise.completeExceptionally(f.cause());
+                            pendingRequest.timeout.cancel();
                         }
-                    } catch (InterruptedException e) {
-                        cause = e;
-                    }
-                    if (cause != null) {
-                        pendingRequestQueue.remove(pendingRequest);
-                        pendingRequest.promise.completeExceptionally(cause);
-                        pendingRequest.timeout.cancel();
-                    }
+                    });
+                    pendingRequestQueue.put(pendingRequest);
+                } catch (InterruptedException e) {
+                    // 放入队列时被打断
+                    future.completeExceptionally(e);
                 } finally {
-                    // 发送完成后释放锁
+                    // 发送完成返回后释放锁
                     lock.unlock();
                 }
             } else {
@@ -212,7 +208,7 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
         try {
             lock.lock();
             pendingRequestQueue.forEach(p -> p.promise.completeExceptionally(cause));
-            pendingRequestQueue.clear();
+            pendingRequestQueue.poll();
         } finally {
             lock.unlock();
         }
@@ -233,7 +229,7 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
                 if (t.isCancelled()) {
                     return;
                 }
-                pendingRequestQueue.remove(this);
+                pendingRequestQueue.poll();
                 promise.completeExceptionally(new MelsecTimeoutException(config.getTimeout()));
 
             }, config.getTimeout().getSeconds(), TimeUnit.SECONDS);
