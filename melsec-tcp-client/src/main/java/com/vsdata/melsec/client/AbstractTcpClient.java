@@ -39,11 +39,12 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
 
     protected final MelsecClientConfig config;
 
-    private Lock lock = new ReentrantLock();
+    private final Lock lock;
 
     public AbstractTcpClient(MelsecClientConfig config) {
         this.config = config;
         channelManager = new ChannelManager(this);
+        lock = new ReentrantLock();
     }
 
     @Override
@@ -126,18 +127,27 @@ public abstract class AbstractTcpClient implements MelsecTcpClient {
         CompletableFuture<T> future = new CompletableFuture<>();
         channelManager.getChannel().whenComplete((ch, ex) -> {
             if (ch != null) {
+                // 获取锁，使得同一时间内只能发送一个请求
+                lock.lock();
                 try {
-                    lock.lock();
                     PendingRequest<? extends FrameEResponse> pendingRequest = new PendingRequest<>(command, future);
                     pendingRequestQueue.add(pendingRequest);
-                    ch.writeAndFlush(command).addListener(f -> {
-                        if (!f.isSuccess()) {
-                            pendingRequestQueue.remove(pendingRequest);
-                            pendingRequest.promise.completeExceptionally(f.cause());
-                            pendingRequest.timeout.cancel();
+                    Throwable cause = null;
+                    try {
+                        ChannelFuture writeFuture = ch.writeAndFlush(command).sync();
+                        if (!writeFuture.isSuccess()) {
+                            cause = writeFuture.cause();
                         }
-                    });
+                    } catch (InterruptedException e) {
+                        cause = e;
+                    }
+                    if (cause != null) {
+                        pendingRequestQueue.remove(pendingRequest);
+                        pendingRequest.promise.completeExceptionally(cause);
+                        pendingRequest.timeout.cancel();
+                    }
                 } finally {
+                    // 发送完成后释放锁
                     lock.unlock();
                 }
             } else {
