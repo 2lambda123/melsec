@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
 public class Melsec3EBinaryClientExample {
 
     public static void main(String[] args) {
-        MelsecClientConfig config = new MelsecClientConfig.Builder("localhost").setPort(6700).build();
+        MelsecClientConfig config = new MelsecClientConfig.Builder("localhost").setPort(3000).build();
         MelsecTcpClient client = MelsecTcpClient.create3EBinary(config);
 
         ByteBuf data = Unpooled.buffer(8);
